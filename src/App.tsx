@@ -25,8 +25,8 @@ import { toast } from 'sonner'
 type PdfChunk = {
   id: string
   fileName: string
-  fromPage: number
-  toPage: number
+  fromPage: string
+  toPage: string
 }
 
 type UploadStatus = 'idle' | 'uploading' | 'ready'
@@ -67,6 +67,12 @@ function createSplitZipFileName(sourceFileName: string) {
   return `${baseName || 'pdf'}-split.zip`
 }
 
+function parsePageValue(value: string) {
+  const pageValue = Number(value)
+
+  return Number.isInteger(pageValue) ? pageValue : null
+}
+
 async function getPdfPageCount(file: File) {
   const formData = new FormData()
 
@@ -101,26 +107,36 @@ function App() {
 
   const hasInvalidChunk = useMemo(
     () =>
-      chunks.some(
-        (chunk) =>
-          chunk.fromPage < 1 ||
-          chunk.toPage < 1 ||
-          chunk.fromPage > chunk.toPage ||
+      chunks.some((chunk) => {
+        const fromPage = parsePageValue(chunk.fromPage)
+        const toPage = parsePageValue(chunk.toPage)
+
+        return (
+          fromPage === null ||
+          toPage === null ||
+          fromPage < 1 ||
+          toPage < 1 ||
+          fromPage > toPage ||
           (pageCount !== null &&
-            (chunk.fromPage > pageCount || chunk.toPage > pageCount)) ||
-          !chunk.fileName.trim(),
-      ),
+            (fromPage > pageCount || toPage > pageCount)) ||
+          !chunk.fileName.trim()
+        )
+      }),
     [chunks, pageCount],
   )
 
   const canAddChunk = useMemo(
-    () =>
-      Boolean(
+    () => {
+      const lastToPage = parsePageValue(chunks.at(-1)?.toPage ?? '')
+
+      return Boolean(
         pdfFile &&
           pageCount &&
           uploadStatus === 'ready' &&
-          (chunks.at(-1)?.toPage ?? 0) < pageCount,
-      ),
+          lastToPage !== null &&
+          lastToPage < pageCount,
+      )
+    },
     [chunks, pageCount, pdfFile, uploadStatus],
   )
 
@@ -183,8 +199,8 @@ function App() {
         {
           id: createChunkId(),
           fileName: createOutputFileName(selectedFile.name, 1),
-          fromPage: 1,
-          toPage: nextPageCount,
+          fromPage: '1',
+          toPage: String(nextPageCount),
         },
       ])
       setUploadProgress(100)
@@ -242,7 +258,7 @@ function App() {
 
   function addChunk() {
     setChunks((currentChunks) => {
-      const lastPage = currentChunks.at(-1)?.toPage ?? 0
+      const lastPage = parsePageValue(currentChunks.at(-1)?.toPage ?? '') ?? 0
       const partNumber = currentChunks.length + 1
 
       return [
@@ -250,8 +266,8 @@ function App() {
         {
           id: createChunkId(),
           fileName: createOutputFileName(pdfFile?.name ?? 'pdf.pdf', partNumber),
-          fromPage: lastPage + 1,
-          toPage: pageCount ?? lastPage + 1,
+          fromPage: String(lastPage + 1),
+          toPage: String(pageCount ?? lastPage + 1),
         },
       ]
     })
@@ -270,11 +286,9 @@ function App() {
     field: 'fromPage' | 'toPage',
     value: string,
   ) {
-    const nextValue = Math.max(1, Number(value) || 1)
-
     setChunks((currentChunks) =>
       currentChunks.map((chunk) =>
-        chunk.id === id ? { ...chunk, [field]: nextValue } : chunk,
+        chunk.id === id ? { ...chunk, [field]: value } : chunk,
       ),
     )
   }
@@ -288,22 +302,43 @@ function App() {
   }
 
   function getChunkStatusLabel(chunk: PdfChunk) {
+    const fromPage = parsePageValue(chunk.fromPage)
+    const toPage = parsePageValue(chunk.toPage)
+
     if (!chunk.fileName.trim()) {
       return 'Thiếu tên tệp'
     }
 
-    if (chunk.fromPage > chunk.toPage) {
+    if (fromPage === null || toPage === null || fromPage < 1 || toPage < 1) {
+      return 'Thiếu số trang'
+    }
+
+    if (fromPage > toPage) {
       return 'Khoảng trang chưa hợp lệ'
     }
 
     if (
       pageCount !== null &&
-      (chunk.fromPage > pageCount || chunk.toPage > pageCount)
+      (fromPage > pageCount || toPage > pageCount)
     ) {
       return 'Vượt quá số trang PDF'
     }
 
     return 'Khoảng trang hợp lệ'
+  }
+
+  function isChunkPageInvalid(chunk: PdfChunk) {
+    const fromPage = parsePageValue(chunk.fromPage)
+    const toPage = parsePageValue(chunk.toPage)
+
+    return (
+      fromPage === null ||
+      toPage === null ||
+      fromPage < 1 ||
+      toPage < 1 ||
+      fromPage > toPage ||
+      (pageCount !== null && (fromPage > pageCount || toPage > pageCount))
+    )
   }
 
   async function handleProcess() {
@@ -320,8 +355,8 @@ function App() {
       JSON.stringify(
         chunks.map(({ fileName, fromPage, toPage }) => ({
           fileName,
-          fromPage,
-          toPage,
+          fromPage: parsePageValue(fromPage),
+          toPage: parsePageValue(toPage),
         })),
       ),
     )
@@ -407,9 +442,9 @@ function App() {
 
             {pdfFile ? (
               <Alert>
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="flex items-start justify-between gap-3">
                   <AlertTitle className="flex min-w-0 flex-wrap items-center gap-2">
-                    <span className="truncate">{pdfFile.name}</span>
+                    <span className="min-w-0 truncate">{pdfFile.name}</span>
                     <Badge
                       variant={
                         uploadStatus === 'ready' ? 'secondary' : 'outline'
@@ -429,7 +464,7 @@ function App() {
                     type="button"
                     variant="destructive"
                     size="sm"
-                    className="self-start"
+                    className="shrink-0"
                     onClick={() => {
                       resetUploadState()
                       toast.info('Đã xóa PDF', {
@@ -488,7 +523,7 @@ function App() {
                       <CardTitle>Phần {index + 1}</CardTitle>
                       <CardAction>
                         <Badge variant="outline">
-                          Trang {chunk.fromPage}-{chunk.toPage}
+                          Trang {chunk.fromPage || '?'}-{chunk.toPage || '?'}
                         </Badge>
                       </CardAction>
                     </CardHeader>
@@ -521,7 +556,7 @@ function App() {
                             type="number"
                             min={1}
                             value={chunk.fromPage}
-                            aria-invalid={chunk.fromPage > chunk.toPage}
+                            aria-invalid={isChunkPageInvalid(chunk)}
                             onChange={(event) =>
                               updateChunkPage(
                                 chunk.id,
@@ -540,7 +575,7 @@ function App() {
                             type="number"
                             min={1}
                             value={chunk.toPage}
-                            aria-invalid={chunk.fromPage > chunk.toPage}
+                            aria-invalid={isChunkPageInvalid(chunk)}
                             onChange={(event) =>
                               updateChunkPage(
                                 chunk.id,
@@ -556,10 +591,7 @@ function App() {
                       <Badge
                         variant={
                           !chunk.fileName.trim() ||
-                          chunk.fromPage > chunk.toPage ||
-                          (pageCount !== null &&
-                            (chunk.fromPage > pageCount ||
-                              chunk.toPage > pageCount))
+                          isChunkPageInvalid(chunk)
                             ? 'destructive'
                             : 'secondary'
                         }
