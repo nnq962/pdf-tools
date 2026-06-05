@@ -442,18 +442,21 @@ function App() {
 
             {pdfFile ? (
               <Alert>
-                <div className="flex items-start justify-between gap-3">
-                  <AlertTitle className="flex min-w-0 flex-wrap items-center gap-2">
-                    <span className="min-w-0 truncate">{pdfFile.name}</span>
+                <div className="flex min-w-0 items-start justify-between gap-3">
+                  <AlertTitle className="flex min-w-0 flex-1 items-center gap-2">
+                    <span className="min-w-0 max-w-[calc(100%-6.5rem)] truncate">
+                      {pdfFile.name}
+                    </span>
                     <Badge
                       variant={
                         uploadStatus === 'ready' ? 'secondary' : 'outline'
                       }
-                      className={
+                      className={[
+                        'shrink-0',
                         uploadStatus === 'ready'
                           ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
-                          : undefined
-                      }
+                          : '',
+                      ].join(' ')}
                     >
                       {uploadStatus === 'ready'
                         ? 'Đã tải lên'
@@ -477,13 +480,13 @@ function App() {
                 </div>
                 <AlertDescription>
                   <div className="mt-2 space-y-2">
-                    <div className="flex items-center justify-between gap-4 text-sm">
-                      <span>
+                    <div className="flex min-w-0 items-center justify-between gap-4 text-sm">
+                      <span className="min-w-0 truncate">
                         {formatFileSize(pdfFile.size)}
                         {pageCount ? ` · ${pageCount} trang` : null}
                         {chunks.length ? ` · ${chunks.length} phần tách` : null}
                       </span>
-                      <span>{uploadProgress}%</span>
+                      <span className="shrink-0">{uploadProgress}%</span>
                     </div>
                     <Progress value={uploadProgress} />
                   </div>
