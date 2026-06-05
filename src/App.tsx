@@ -31,6 +31,13 @@ type PdfChunk = {
 
 type UploadStatus = 'idle' | 'uploading' | 'ready'
 
+const apiBaseUrl =
+  import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, '') ?? 'http://127.0.0.1:8000'
+
+type PageCountResponse = {
+  pageCount: number
+}
+
 function createChunkId() {
   return crypto.randomUUID()
 }
@@ -49,12 +56,48 @@ function createOutputFileName(sourceFileName: string, partNumber: number) {
   return `${baseName}-${partNumber}.pdf`
 }
 
+function createSplitZipFileName(sourceFileName: string) {
+  const baseName = sourceFileName
+    .replace(/\.pdf$/i, '')
+    .replace(/[\\/:*?"<>|]+/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[. ]+$/g, '')
+
+  return `${baseName || 'pdf'}-split.zip`
+}
+
+async function getPdfPageCount(file: File) {
+  const formData = new FormData()
+
+  formData.append('file', file)
+
+  const response = await fetch(`${apiBaseUrl}/pdf/page-count`, {
+    method: 'POST',
+    body: formData,
+  })
+
+  if (!response.ok) {
+    const errorPayload = (await response.json().catch(() => null)) as {
+      detail?: string
+    } | null
+
+    throw new Error(errorPayload?.detail ?? 'Không thể đọc số trang PDF.')
+  }
+
+  const payload = (await response.json()) as PageCountResponse
+
+  return payload.pageCount
+}
+
 function App() {
   const [pdfFile, setPdfFile] = useState<File | null>(null)
   const [chunks, setChunks] = useState<PdfChunk[]>([])
+  const [pageCount, setPageCount] = useState<number | null>(null)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [uploadStatus, setUploadStatus] = useState<UploadStatus>('idle')
   const [isDragging, setIsDragging] = useState(false)
+  const [isProcessing, setIsProcessing] = useState(false)
 
   const hasInvalidChunk = useMemo(
     () =>
@@ -63,9 +106,22 @@ function App() {
           chunk.fromPage < 1 ||
           chunk.toPage < 1 ||
           chunk.fromPage > chunk.toPage ||
+          (pageCount !== null &&
+            (chunk.fromPage > pageCount || chunk.toPage > pageCount)) ||
           !chunk.fileName.trim(),
       ),
-    [chunks],
+    [chunks, pageCount],
+  )
+
+  const canAddChunk = useMemo(
+    () =>
+      Boolean(
+        pdfFile &&
+          pageCount &&
+          uploadStatus === 'ready' &&
+          (chunks.at(-1)?.toPage ?? 0) < pageCount,
+      ),
+    [chunks, pageCount, pdfFile, uploadStatus],
   )
 
   useEffect(() => {
@@ -82,14 +138,7 @@ function App() {
 
     const progressTimer = window.setInterval(() => {
       setUploadProgress((currentProgress) => {
-        const nextProgress = Math.min(currentProgress + 18, 100)
-
-        if (nextProgress === 100) {
-          window.clearInterval(progressTimer)
-          setUploadStatus('ready')
-        }
-
-        return nextProgress
+        return Math.min(currentProgress + 12, 88)
       })
     }, 120)
 
@@ -99,12 +148,13 @@ function App() {
   function resetUploadState() {
     setPdfFile(null)
     setChunks([])
+    setPageCount(null)
     setUploadProgress(0)
     setUploadStatus('idle')
     setIsDragging(false)
   }
 
-  function handleSelectedFile(selectedFile: File) {
+  async function handleSelectedFile(selectedFile: File) {
     if (
       selectedFile.type !== 'application/pdf' &&
       !selectedFile.name.toLowerCase().endsWith('.pdf')
@@ -117,19 +167,37 @@ function App() {
     }
 
     setPdfFile(selectedFile)
-    setChunks([
-      {
-        id: createChunkId(),
-        fileName: createOutputFileName(selectedFile.name, 1),
-        fromPage: 1,
-        toPage: 1,
-      },
-    ])
+    setChunks([])
+    setPageCount(null)
     setUploadProgress(12)
     setUploadStatus('uploading')
     toast.info('Đang tải PDF', {
       description: selectedFile.name,
     })
+
+    try {
+      const nextPageCount = await getPdfPageCount(selectedFile)
+
+      setPageCount(nextPageCount)
+      setChunks([
+        {
+          id: createChunkId(),
+          fileName: createOutputFileName(selectedFile.name, 1),
+          fromPage: 1,
+          toPage: nextPageCount,
+        },
+      ])
+      setUploadProgress(100)
+      setUploadStatus('ready')
+    } catch (error) {
+      resetUploadState()
+      toast.error('Không thể tải lên', {
+        description:
+          error instanceof Error
+            ? error.message
+            : 'Không thể đọc số trang PDF.',
+      })
+    }
   }
 
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
@@ -139,7 +207,7 @@ function App() {
       return
     }
 
-    handleSelectedFile(selectedFile)
+    void handleSelectedFile(selectedFile)
     event.target.value = ''
   }
 
@@ -168,7 +236,7 @@ function App() {
     const droppedFile = event.dataTransfer.files[0]
 
     if (droppedFile) {
-      handleSelectedFile(droppedFile)
+      void handleSelectedFile(droppedFile)
     }
   }
 
@@ -183,7 +251,7 @@ function App() {
           id: createChunkId(),
           fileName: createOutputFileName(pdfFile?.name ?? 'pdf.pdf', partNumber),
           fromPage: lastPage + 1,
-          toPage: lastPage + 1,
+          toPage: pageCount ?? lastPage + 1,
         },
       ]
     })
@@ -219,14 +287,81 @@ function App() {
     )
   }
 
-  function handleProcess() {
+  function getChunkStatusLabel(chunk: PdfChunk) {
+    if (!chunk.fileName.trim()) {
+      return 'Thiếu tên tệp'
+    }
+
+    if (chunk.fromPage > chunk.toPage) {
+      return 'Khoảng trang chưa hợp lệ'
+    }
+
+    if (
+      pageCount !== null &&
+      (chunk.fromPage > pageCount || chunk.toPage > pageCount)
+    ) {
+      return 'Vượt quá số trang PDF'
+    }
+
+    return 'Khoảng trang hợp lệ'
+  }
+
+  async function handleProcess() {
     if (!pdfFile || hasInvalidChunk) {
       return
     }
 
-    toast.success('Sẵn sàng xử lý', {
-      description: `Đã tạo cấu hình tách ${chunks.length} phần cho ${pdfFile.name}.`,
-    })
+    setIsProcessing(true)
+
+    const formData = new FormData()
+    formData.append('file', pdfFile)
+    formData.append(
+      'chunks',
+      JSON.stringify(
+        chunks.map(({ fileName, fromPage, toPage }) => ({
+          fileName,
+          fromPage,
+          toPage,
+        })),
+      ),
+    )
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/pdf/split`, {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (!response.ok) {
+        const errorPayload = (await response.json().catch(() => null)) as {
+          detail?: string
+        } | null
+
+        throw new Error(errorPayload?.detail ?? 'Không thể tách PDF.')
+      }
+
+      const zipBlob = await response.blob()
+      const downloadUrl = URL.createObjectURL(zipBlob)
+      const downloadLink = document.createElement('a')
+
+      downloadLink.href = downloadUrl
+      downloadLink.download = createSplitZipFileName(pdfFile.name)
+      downloadLink.click()
+      URL.revokeObjectURL(downloadUrl)
+
+      toast.success('Đã tách PDF', {
+        description: `Đã tạo ${chunks.length} tệp từ ${pdfFile.name}.`,
+      })
+    } catch (error) {
+      toast.error('Xử lý thất bại', {
+        description:
+          error instanceof Error
+            ? error.message
+            : 'Có lỗi xảy ra khi tách PDF.',
+      })
+    } finally {
+      setIsProcessing(false)
+    }
   }
 
   return (
@@ -309,8 +444,9 @@ function App() {
                   <div className="mt-2 space-y-2">
                     <div className="flex items-center justify-between gap-4 text-sm">
                       <span>
-                        {formatFileSize(pdfFile.size)} · {chunks.length} phần
-                        tách
+                        {formatFileSize(pdfFile.size)}
+                        {pageCount ? ` · ${pageCount} trang` : null}
+                        {chunks.length ? ` · ${chunks.length} phần tách` : null}
                       </span>
                       <span>{uploadProgress}%</span>
                     </div>
@@ -336,7 +472,7 @@ function App() {
                 className="bg-sky-500 text-white hover:bg-sky-600 focus-visible:ring-sky-200 disabled:bg-muted disabled:text-muted-foreground"
                 aria-label="Thêm phần tách"
                 title="Thêm phần tách"
-                disabled={!pdfFile}
+                disabled={!canAddChunk}
                 onClick={addChunk}
               >
                 +
@@ -420,16 +556,15 @@ function App() {
                       <Badge
                         variant={
                           !chunk.fileName.trim() ||
-                          chunk.fromPage > chunk.toPage
+                          chunk.fromPage > chunk.toPage ||
+                          (pageCount !== null &&
+                            (chunk.fromPage > pageCount ||
+                              chunk.toPage > pageCount))
                             ? 'destructive'
                             : 'secondary'
                         }
                       >
-                        {!chunk.fileName.trim()
-                          ? 'Thiếu tên tệp'
-                          : chunk.fromPage > chunk.toPage
-                          ? 'Khoảng trang chưa hợp lệ'
-                          : 'Khoảng trang hợp lệ'}
+                        {getChunkStatusLabel(chunk)}
                       </Badge>
                       <Button
                         type="button"
@@ -450,16 +585,23 @@ function App() {
           <CardFooter className="flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="text-sm text-muted-foreground">
               {pdfFile
-                ? `${chunks.length} phần đã cấu hình`
+                ? `${chunks.length} phần đã cấu hình${
+                    pageCount ? ` · ${pageCount} trang` : ''
+                  }`
                 : 'Chưa có phần nào'}
             </div>
             <Button
               type="button"
               className="w-full sm:w-auto"
-              disabled={!pdfFile || hasInvalidChunk}
+              disabled={
+                !pdfFile ||
+                hasInvalidChunk ||
+                isProcessing ||
+                uploadStatus !== 'ready'
+              }
               onClick={handleProcess}
             >
-              Xử lý
+              {isProcessing ? 'Đang xử lý' : 'Xử lý'}
             </Button>
           </CardFooter>
         </Card>
